@@ -3,6 +3,7 @@
 import argparse
 import json
 import mimetypes
+import re
 import secrets
 import shutil
 import subprocess
@@ -59,15 +60,25 @@ class Handler(BaseHTTPRequestHandler):
         path=Path(video['path']); size=path.stat().st_size
         first,last=0,size-1; status=200
         range_header=self.headers.get('Range')
-        if range_header:
-            import re
-            match=re.fullmatch(r'bytes=(\d*)-(\d*)',range_header)
-            if not match or not any(match.groups()): return self.reply(416,{'error':'Rango inválido'})
-            a,b=match.groups()
-            if a: first=int(a); last=min(int(b),last) if b else last
-            else: first=max(0,size-int(b))
-            if first>last or first>=size:
-                self.send_response(416); self.send_header('Content-Range',f'bytes */{size}'); self.end_headers(); return
+        if range_header is not None:
+            match=re.fullmatch(r'bytes=([0-9]*)-([0-9]*)',range_header)
+            try:
+                if not match or not any(match.groups()): raise ValueError
+                a,b=match.groups()
+                if a: first=int(a); last=min(int(b),last) if b else last
+                else:
+                    suffix=int(b)
+                    if suffix<=0: raise ValueError
+                    first=max(0,size-suffix)
+                if first>last or first>=size: raise ValueError
+            except ValueError:
+                body=json.dumps({'error':'Rango inválido'},ensure_ascii=False).encode()
+                self.send_response(416)
+                self.send_header('Content-Range',f'bytes */{size}')
+                self.send_header('Content-Type','application/json; charset=utf-8')
+                self.send_header('Content-Length',str(len(body)))
+                self.send_header('Accept-Ranges','bytes')
+                self.end_headers(); self.wfile.write(body); return
             status=206
         self.send_response(status)
         self.send_header('Content-Type',mimetypes.guess_type(str(path))[0] or 'application/octet-stream')
@@ -88,8 +99,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(403,{'error':'Petición no autorizada'})
         url=urllib.parse.urlsplit(self.path); store=self.server.store
         try:
-            length=int(self.headers.get('Content-Length','0'))
             if url.path=='/api/video':
+                lengths=self.headers.get_all('Content-Length',[])
+                if not lengths: return self.reply(411,{'error':'Falta Content-Length'})
+                if self.headers.get('Transfer-Encoding') is not None or len(lengths)!=1 or not re.fullmatch(r'[0-9]+',lengths[0]):
+                    return self.reply(400,{'error':'Content-Length inválido'})
+                try: length=int(lengths[0])
+                except ValueError: return self.reply(400,{'error':'Content-Length inválido'})
                 if not 0<length<=8*1024**3: raise ValueError('Vídeo vacío o mayor de 8 GB')
                 q=urllib.parse.parse_qs(url.query)
                 cid=int(q['chapter'][0]); offset=core.ms(q['offset'][0]); name=q['name'][0]
@@ -104,11 +120,25 @@ class Handler(BaseHTTPRequestHandler):
                         while remaining:
                             chunk=self.rfile.read(min(1024*1024,remaining))
                             if not chunk: raise ValueError('Carga interrumpida')
-                            f.write(chunk); remaining-=len(chunk)
-                    vid=store.add_video(cid,name,path,offset)
+                            if len(chunk)>remaining: raise ValueError('Carga mayor que Content-Length')
+                            if f.write(chunk)!=len(chunk): raise OSError('Escritura incompleta')
+                            remaining-=len(chunk)
+                    if path.stat().st_size!=length: raise OSError('Tamaño de archivo inconsistente')
+                    if offset<0: raise ValueError('El desfase debe ser positivo o cero')
+                    duration=core.metadata(path)
+                    if duration<=0: raise ValueError('Vídeo vacío')
+                    # Keep registration and verification in one SQLite transaction.
+                    with store.connect() as db:
+                        store.require_chapter(db,cid)
+                        expected=(cid,Path(name).name,str(path.resolve()),offset,duration)
+                        vid=db.execute('INSERT INTO videos(chapter,name,path,offset,duration) VALUES(?,?,?,?,?)',expected).lastrowid
+                        row=db.execute('SELECT chapter,name,path,offset,duration FROM videos WHERE id=?',(vid,)).fetchone()
+                        if row is None or tuple(row)!=expected or path.stat().st_size!=length:
+                            raise OSError('Registro o archivo inconsistente')
                 except Exception:
                     path.unlink(missing_ok=True); raise
                 return self.reply(200,{'id':vid})
+            length=int(self.headers.get('Content-Length','0'))
             if not 0<length<=4*1024*1024: raise ValueError('Petición demasiado grande o vacía')
             p=json.loads(self.rfile.read(length))
             if url.path=='/api/chapter': result={'id':store.chapter(p['name'],p['srt'])}
@@ -140,3 +170,4 @@ def main():
     except KeyboardInterrupt: pass
     finally: server.server_close()
 if __name__=='__main__': main()
+
