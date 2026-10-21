@@ -10,7 +10,7 @@ import subprocess
 from pathlib import Path
 import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from studio import Store, REVIEW, OVERLAP, validate_proposal
+from studio import Store, REVIEW, OVERLAP, validate_proposal, parse_srt
 from app import Server
 import dubstudio as core
 
@@ -59,6 +59,22 @@ class StudioTest(unittest.TestCase):
         self.assertEqual(self.store.state(cid)['lines'][0]['original'],'  Hello / hi!  \nAgain.  ')
         with self.assertRaises(ValueError): self.store.chapter('Bad',SRT+'\nInvalid block')
         with self.assertRaises(ValueError): self.store.review(self.line()['id'],REVIEW,'','Hello\n\nBad DUB separator')
+    def test_user_srt_sample_and_equivalent_time_notation(self):
+        sample='1\n00:00:15,120 --> 00:00:15,760\nWhat?\n\n2\n00:00:17,160 --> 00:00:18,120\nThe deputy had an accident?'
+        blocks=parse_srt(sample)
+        self.assertEqual([(x['start'],x['end']) for x in blocks],[('00:00:15,120','00:00:15,760'),('00:00:17,160','00:00:18,120')])
+        alternate='1\r0:00:15.12\t-->\t00:00:15.760\tX1:0 X2:100\r  What? / hi!  \r'
+        variant=parse_srt(alternate)[0]
+        self.assertEqual((variant['start'],variant['end']),('00:00:15,120','00:00:15,760'))
+        self.assertEqual(variant['text'],'  What? / hi!  ')
+    def test_srt_error_identifies_bad_block_and_is_atomic(self):
+        invalid=SRT+'\n3\n00:00:21:12 --> 00:00:22,000\nFrame-based timestamp\n'
+        before=self.store.state()['chapters']
+        with self.assertRaisesRegex(ValueError,'Bloque 3.*00:00:21:12'):
+            self.store.chapter('Invalid',invalid)
+        self.assertEqual(self.store.state()['chapters'],before)
+        with self.assertRaisesRegex(ValueError,'fuera de rango'):
+            parse_srt('1\n00:60:00,000 --> 01:00:02,000\nInvalid minutes')
     def test_identity_scope_and_no_invention(self):
         other=self.store.chapter('Other',SRT); self.identity()
         line=self.store.state(other)['lines'][0]
@@ -116,6 +132,12 @@ class StudioTest(unittest.TestCase):
         base=f'http://127.0.0.1:{server.server_port}'
         with urllib.request.urlopen(base+'/api/state?chapter='+str(self.cid)) as r: data=json.load(r)
         self.assertEqual(len(data['lines']),2)
+        with urllib.request.urlopen(base+'/api/health') as r:health=json.load(r)
+        self.assertEqual(health['api_version'],2)
+        self.assertEqual(health['instance'],server.instance)
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(urllib.request.Request(base+'/api/shutdown',data=b'{}'))
+        self.assertEqual(error.exception.code,403)
         body=json.dumps({'id':self.line()['id'],'speaker':REVIEW,'evidence':'Manual'}).encode()
         with self.assertRaises(urllib.error.HTTPError) as error:
             urllib.request.urlopen(urllib.request.Request(base+'/api/review',data=body))

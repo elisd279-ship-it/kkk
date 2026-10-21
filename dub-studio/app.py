@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Run: python app.py; all project data stays under --data."""
 import argparse
+import hashlib
+import logging
+from logging.handlers import RotatingFileHandler
+import socket
+import threading
 import json
 import mimetypes
 import secrets
@@ -13,15 +18,38 @@ from studio import Store, Gemini
 import dubstudio as core
 
 WEB=Path(__file__).parent/'web'
+API_VERSION=2
 
 class Server(ThreadingHTTPServer):
     def __init__(self,address,store):
         super().__init__(address,Handler)
         self.store=store
         self.token=secrets.token_urlsafe(32)
+        self.instance=secrets.token_hex(16)
+        self.build=':'.join(hashlib.sha256((WEB.parent/name).read_bytes()).hexdigest()
+                            for name in ('app.py','studio.py','dubstudio.py'))
+        self.active=0
+        self.active_lock=threading.Lock()
+        self.logger=logging.getLogger('dubstudio.'+self.instance)
+        self.logger.setLevel(logging.INFO)
+        handler=RotatingFileHandler(store.root/'app.log',maxBytes=1024*1024,backupCount=2,encoding='utf8')
+        handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+        self.logger.addHandler(handler)
+        self.logger.propagate=False
+
+    def server_close(self):
+        super().server_close()
+        logger=getattr(self,'logger',None)
+        if logger:
+            for handler in logger.handlers[:]:
+                handler.close()
+                logger.removeHandler(handler)
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self,*args): pass
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(180)
     def reply(self,status,data,kind='application/json; charset=utf-8'):
         body=json.dumps(data,ensure_ascii=False).encode() if kind.startswith('application/json') else data
         self.send_response(status)
@@ -37,6 +65,10 @@ class Handler(BaseHTTPRequestHandler):
         if not self.local_request(): return self.reply(403,{'error':'Host no permitido'})
         url=urllib.parse.urlsplit(self.path); q=urllib.parse.parse_qs(url.query)
         try:
+            if url.path=='/api/health':
+                return self.reply(200,{'app':'DUB Studio','api_version':API_VERSION,
+                    'instance':self.server.instance,'build':self.server.build,
+                    'app_dir':str(WEB.parent.resolve()),'data_dir':str(self.server.store.root)})
             if url.path=='/api/state':
                 data=self.server.store.state(int(q['chapter'][0]) if 'chapter' in q else None)
                 data['token']=self.server.token
@@ -52,6 +84,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200,path.read_bytes(),mimetypes.guess_type(str(path))[0]+'; charset=utf-8')
             self.reply(404,{'error':'No encontrado'})
         except (ValueError,KeyError,FileNotFoundError) as exc: self.reply(400,{'error':str(exc)})
+        except (BrokenPipeError,ConnectionResetError): pass
+        except Exception:
+            self.server.logger.exception('GET %s',url.path)
+            self.reply(500,{'error':'No se pudo leer el proyecto. Consulta app.log en la carpeta de datos de DUB Studio'})
     def media(self,vid):
         with self.server.store.connect() as db:
             video=db.execute('SELECT path FROM videos WHERE id=?',(vid,)).fetchone()
@@ -87,6 +123,14 @@ class Handler(BaseHTTPRequestHandler):
         if not self.local_request() or self.headers.get('X-DUB-Token')!=self.server.token:
             return self.reply(403,{'error':'Petición no autorizada'})
         url=urllib.parse.urlsplit(self.path); store=self.server.store
+        if url.path=='/api/shutdown':
+            with self.server.active_lock:
+                if self.server.active:
+                    return self.reply(409,{'error':'Espera a que termine la operación antes de cerrar DUB Studio'})
+            self.reply(200,{'ok':True})
+            threading.Thread(target=self.server.shutdown,daemon=True).start()
+            return
+        with self.server.active_lock: self.server.active+=1
         try:
             length=int(self.headers.get('Content-Length','0'))
             if url.path=='/api/video':
@@ -121,8 +165,19 @@ class Handler(BaseHTTPRequestHandler):
             else: return self.reply(404,{'error':'Ruta inexistente'})
             self.reply(200,result)
         except (ValueError,KeyError,TypeError) as exc: self.reply(400,{'error':str(exc)})
+        except (BrokenPipeError,ConnectionResetError): pass
+        except (socket.timeout,TimeoutError):
+            self.server.logger.warning('Timeout en %s',url.path)
+            self.reply(408,{'error':'La carga tardó demasiado. Vuelve a intentarlo'})
+        except OSError as exc:
+            self.server.logger.exception('Acceso a archivos en %s',url.path)
+            self.reply(507 if exc.errno==28 else 500,{'error':'No se pudo guardar o leer el archivo. Comprueba el espacio y los permisos de la carpeta de DUB Studio'})
         except subprocess.SubprocessError: self.reply(400,{'error':'FFmpeg no pudo leer el audio/vídeo; comprueba formato y archivo'})
-        except Exception: self.reply(500,{'error':'No se pudo completar la operación; los datos anteriores se conservan'})
+        except Exception:
+            self.server.logger.exception('POST %s',url.path)
+            self.reply(500,{'error':'No se pudo completar la operación. Los datos anteriores se conservan; consulta app.log'})
+        finally:
+            with self.server.active_lock: self.server.active-=1
 
 def main():
     parser=argparse.ArgumentParser(description='DUB Studio local')

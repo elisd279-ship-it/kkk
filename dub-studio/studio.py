@@ -15,23 +15,40 @@ import dubstudio as core
 REVIEW = '[REVISAR]'
 OVERLAP = '[REVISAR – VOCES SUPERPUESTAS]'
 
+def srt_stamp(value, block_number, timeline):
+    # Equivalent notation is normalized to DUB milliseconds, never rounded or shifted.
+    match = re.fullmatch(r'([0-9]{1,2}):([0-9]{2}):([0-9]{2})[,.]([0-9]{1,3})',value)
+    if not match:
+        raise ValueError(f'Bloque {block_number}: timecode SRT inválido en «{timeline}». '
+                         'Se espera HH:MM:SS,mmm (por ejemplo 00:00:15,120).')
+    hours,minutes,seconds,fraction = match.groups()
+    if int(minutes)>=60 or int(seconds)>=60:
+        raise ValueError(f'Bloque {block_number}: minutos o segundos fuera de rango en «{timeline}».')
+    return f'{int(hours):02}:{minutes}:{seconds},{fraction.ljust(3,"0")}'
+
 def parse_srt(source):
-    # Preserve dialogue whitespace; do not use strip() on subtitle content.
-    source = source.removeprefix('\ufeff').replace('\r\n','\n').rstrip('\n')
+    # Preserve dialogue whitespace; normalize line endings and time notation only.
+    source = source.removeprefix('\ufeff').replace('\r\n','\n').replace('\r','\n').rstrip('\n')
     blocks = []
-    for part in re.split(r'\n[ \t]*\n+', source):
-        if not part: continue
+    for part in re.split(r'\n[ \t\u00a0]*\n+', source):
+        if not part.strip(): continue
         lines = part.split('\n')
-        ti = 1 if lines[0].strip().isdigit() else 0
-        if ti >= len(lines) or ' --> ' not in lines[ti]:
-            raise ValueError('Bloque SRT sin timecode válido; no se importó el capítulo')
-        start, end = lines[ti].split(' --> ', 1)
-        start = start.strip(); end = end.strip().split(' ')[0]
-        if not core.STAMP.fullmatch(start) or not core.STAMP.fullmatch(end):
-            raise ValueError('Timecode SRT inválido')
+        while lines and not lines[0].strip(): lines.pop(0)
+        number = len(blocks)+1
+        ti = 1 if lines[0].lstrip('\ufeff').strip().isdigit() else 0
+        if ti >= len(lines): raise ValueError(f'Bloque {number}: falta la línea de tiempos.')
+        timeline = lines[ti].translate(dict.fromkeys(map(ord,'\ufeff\u200e\u200f\u202a\u202b\u202c'))).strip()
+        pieces = re.split(r'\s*-->\s*',timeline)
+        if len(pieces)!=2:
+            raise ValueError(f'Bloque {number}: falta una línea de tiempos con -->. Línea: «{timeline[:180]}».')
+        start = srt_stamp(pieces[0].strip(),number,timeline)
+        end_parts = pieces[1].split()
+        end = srt_stamp(end_parts[0] if end_parts else '',number,timeline)
+        if core.ms(end)<=core.ms(start):
+            raise ValueError(f'Bloque {number}: el final debe ser posterior al inicio en «{timeline}».')
         text = '\n'.join(lines[ti+1:])
-        if not text.strip(): raise ValueError('Intervención SRT vacía')
-        blocks.append({'index':len(blocks)+1,'start':start,'end':end,'text':text})
+        if not text.strip(): raise ValueError(f'Bloque {number}: intervención SRT vacía.')
+        blocks.append({'index':number,'start':start,'end':end,'text':text})
     return blocks
 
 def valid_translation(text):

@@ -297,16 +297,95 @@ function New-AppShortcuts([string]$Application) {
     }
 }
 
-function Start-Studio([string]$Python, [string]$FFmpegBin, [string]$Application) {
+function Get-StudioHealth([int]$Port) {
+    if ($Port -lt 1024 -or $Port -gt 65535) { return $null }
+    try {
+        $health = Invoke-RestMethod -Uri ("http://127.0.0.1:{0}/api/health" -f $Port) -TimeoutSec 2
+        if ($health.app -eq 'DUB Studio' -and $health.api_version -eq 2) { return $health }
+    } catch { }
+    return $null
+}
+
+function Read-StudioPointer([string]$Root) {
+    try {
+        $path = Join-Path $Root 'server.json'
+        if ((Test-Path -LiteralPath $path) -and (Get-Item -LiteralPath $path).Length -lt 8192) {
+            return (Get-Content -LiteralPath $path -Raw | ConvertFrom-Json)
+        }
+    } catch { }
+    return $null
+}
+
+function Stop-ManagedStudio([string]$Root,[string]$Application) {
+    $pointer = Read-StudioPointer $Root
+    if (-not $pointer) { return }
+    $health = Get-StudioHealth $pointer.port
+    if (-not $health -or $health.instance -ne $pointer.instance -or $health.app_dir -ne $Application) { return }
+    $baseUrl = "http://127.0.0.1:$($pointer.port)"
+    $state = Invoke-RestMethod -Uri ($baseUrl+'/api/state') -TimeoutSec 3
+    try {
+        Invoke-RestMethod -Uri ($baseUrl+'/api/shutdown') -Method Post -Headers @{'X-DUB-Token'=$state.token} -Body '{}' -ContentType 'application/json' -TimeoutSec 3 | Out-Null
+    } catch { throw 'Termina las operaciones de DUB Studio y vuelve a ejecutar Instalar.bat.' }
+    for ($attempt=0; $attempt -lt 30; $attempt++) {
+        if (-not (Get-StudioHealth $pointer.port)) { return }
+        Start-Sleep -Milliseconds 200
+    }
+    throw 'DUB Studio todavia se esta cerrando. Vuelve a intentar la instalacion.'
+}
+
+function Start-Studio {
+    param([string]$Python,[string]$FFmpegBin,[string]$Application,
+        [string]$DataRoot = $(Join-Path ([Environment]::GetFolderPath('UserProfile')) '.dubstudio'),
+        [int]$PreferredPort=8765,[switch]$NoBrowser)
+    $root = Split-Path $Application -Parent
+    $build = (@('app.py','studio.py','dubstudio.py') | ForEach-Object {
+        (Get-FileHash -LiteralPath (Join-Path $Application $_) -Algorithm SHA256).Hash.ToLowerInvariant()
+    }) -join ':'
+    $pointer = Read-StudioPointer $root
+    if ($pointer) {
+        $health = Get-StudioHealth $pointer.port
+        if ($health -and $health.instance -eq $pointer.instance -and $health.app_dir -eq $Application -and $health.data_dir -eq $DataRoot) {
+            if ($health.build -eq $build) {
+                $url = "http://127.0.0.1:$($pointer.port)"
+                if (-not $NoBrowser) { Start-Process $url }
+                return [PSCustomObject]@{url=$url;port=$pointer.port;instance=$health.instance;reused=$true}
+            }
+            Stop-ManagedStudio $root $Application
+        }
+    }
+    $port = $null
+    for ($candidate=$PreferredPort; $candidate -lt $PreferredPort+10; $candidate++) {
+        $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,$candidate)
+        try { $listener.Start(); $port=$candidate; break } catch { } finally { $listener.Stop() }
+    }
+    if (-not $port) { throw 'No hay un puerto local disponible para DUB Studio.' }
+    $logs = Join-Path $root 'logs'
+    New-Item -ItemType Directory -Path $logs -Force | Out-Null
+    $tag = [Guid]::NewGuid().ToString('N')
+    $stdout = Join-Path $logs ("app-$tag.out.log")
+    $stderr = Join-Path $logs ("app-$tag.error.log")
     $oldPath = $env:PATH
     try {
         $env:PATH = $FFmpegBin + [IO.Path]::PathSeparator + $oldPath
-        Push-Location -LiteralPath $Application
-        try {
-            & $Python (Join-Path $Application 'app.py') --open-browser
-            if ($LASTEXITCODE -ne 0) { throw "DUB Studio exited with code $LASTEXITCODE" }
-        } finally { Pop-Location }
-    } finally { $env:PATH = $oldPath }
+        $arguments = @(('"{0}"' -f (Join-Path $Application 'app.py')),'--data',('"{0}"' -f $DataRoot),'--port',"$port")
+        # A separate hidden console keeps Python alive after the installer window closes.
+        $process = Start-Process -FilePath $Python -ArgumentList $arguments -WorkingDirectory $root -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    } finally { $env:PATH=$oldPath }
+    for ($attempt=0; $attempt -lt 40; $attempt++) {
+        if ($process.HasExited) { throw ("DUB Studio no pudo iniciar. Registro: {0}" -f $stderr) }
+        $health = Get-StudioHealth $port
+        if ($health -and $health.app_dir -eq $Application -and $health.data_dir -eq $DataRoot -and $health.build -eq $build) {
+            @{port=$port;instance=$health.instance;pid=$process.Id} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'server.json') -Encoding UTF8
+            $url = "http://127.0.0.1:$port"
+            if (-not $NoBrowser) { Start-Process $url }
+            Write-Host 'DUB Studio permanece activo aunque cierres esta ventana. Usa Cerrar aplicacion en la interfaz para salir.'
+            return [PSCustomObject]@{url=$url;port=$port;instance=$health.instance;reused=$false}
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    # Only terminate the child created above, never an unrelated process using the port.
+    if (-not $process.HasExited) { Stop-Process -Id $process.Id }
+    throw ("DUB Studio no respondio al iniciar. Registro: {0}" -f $stderr)
 }
 
 function Invoke-Installer {
@@ -329,6 +408,10 @@ function Invoke-Installer {
         $python = Install-Python $manifest.python $InstallRoot $cache -BundledOnly:$BundledOnly
         $ffmpeg = Install-FFmpeg $manifest.ffmpeg $InstallRoot $cache -BundledOnly:$BundledOnly
         $script:InstallerPhase = 'Instalar aplicacion'
+        $installed = Join-Path $InstallRoot 'app'
+        if ([IO.Path]::GetFullPath($SourceRoot).TrimEnd('\','/') -ne [IO.Path]::GetFullPath($installed).TrimEnd('\','/')) {
+            Stop-ManagedStudio $InstallRoot $installed
+        }
         $application = Install-Application $SourceRoot $InstallRoot
         if (-not $NoShortcuts) {
             try { New-AppShortcuts $application } catch { Write-Warning 'Could not create shortcuts. You can still use Iniciar.bat.' }
@@ -339,7 +422,7 @@ function Invoke-Installer {
         Write-Host 'Projects remain in your user profile: .dubstudio'
     } finally { if ($lock) { $lock.Dispose() } }
     $script:InstallerPhase = 'Iniciar DUB Studio'
-    if ($Launch) { Start-Studio $python $ffmpeg $application }
+    if ($Launch) { Start-Studio $python $ffmpeg $application | Out-Null }
 }
 
 if ($MyInvocation.InvocationName -ne '.') {

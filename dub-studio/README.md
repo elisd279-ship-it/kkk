@@ -153,3 +153,22 @@ Cierra otras ventanas de DUB Studio y ejecuta el `Instalar.bat` de la versión a
 Si persiste, abre `%LOCALAPPDATA%\DUBStudio\install.log` y comparte sus últimas líneas:
 incluyen la fase, ruta y excepción originales para distinguir un bloqueo transitorio
 de una restricción permanente. El instalador respeta las restricciones de Windows.
+
+### Cerrar la ventana de inicio e importar SRT
+
+En Windows la aplicación continúa activa al cerrar la ventana del instalador o lanzador.
+El navegador se abre después de comprobar que DUB Studio responde. El acceso directo
+reutiliza la instancia existente; **Cerrar aplicación** en la interfaz la detiene.
+Al actualizar desde una versión anterior que todavía usa la ventana negra, ciérrala antes
+de ejecutar el instalador actualizado.
+
+La importación admite UTF-8 y UTF-16 con marca de codificación. Para archivos antiguos,
+selecciona Windows-1252 o UTF-16 explícitamente. No se sustituyen caracteres inválidos
+silenciosamente. Los errores señalan el bloque y la línea de tiempos que necesitan revisión;
+si un bloque es inválido, no se crea un capítulo parcial. Se admiten puntos o comas decimales,
+fracciones de 1 a 3 cifras y espacios o tabulaciones alrededor de la flecha. Solo se normaliza
+su representación a HH:MM:SS,mmm, conservando el instante exacto; nunca se infieren fotogramas.
+
+Si se pierde la conexión, la interfaz indica cómo volver a abrir la aplicación y conserva
+los datos guardados. El registro de aplicación está en `%USERPROFILE%\.dubstudio\app.log`.
+Prueba opcional de navegador para importación: `python tests/browser_import.py` (Playwright).
