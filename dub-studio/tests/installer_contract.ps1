@@ -80,6 +80,50 @@ try {
     Assert-True (@(Get-ChildItem $root -Directory -Filter 'app-backup-*').Count -eq 1) 'Launching installed application is idempotent'
     Assert-True (@(Get-ChildItem $root -Directory -Filter 'app-staging-*').Count -eq 0) 'Staging files cleaned'
 
+    # Bounded retry policy: sharing/access errors only, with useful final context.
+    $script:attempts = 0
+    $result = Invoke-FileOperation -Description 'fixture lock' -Path $temporary -Attempts 3 -DelayMilliseconds 1 -Action {
+        $script:attempts++
+        if ($script:attempts -lt 3) { throw [ComponentModel.Win32Exception]::new(32,'fixture sharing violation') }
+        return 'released'
+    }
+    Assert-True ($result -eq 'released' -and $script:attempts -eq 3) 'Transient file lock is retried successfully'
+    $script:attempts = 0
+    Assert-Throws {
+        Invoke-FileOperation -Description 'fixture permanent lock' -Path $temporary -Attempts 2 -DelayMilliseconds 1 -Action {
+            $script:attempts++
+            throw [UnauthorizedAccessException]::new('fixture denied')
+        }
+    } 'Persistent access denial remains an error'
+    Assert-True ($script:attempts -eq 2) 'Retries stop at the configured limit'
+    $script:attempts = 0
+    Assert-Throws {
+        Invoke-FileOperation -Description 'fixture other failure' -Path $temporary -Attempts 3 -DelayMilliseconds 1 -Action {
+            $script:attempts++
+            throw [InvalidOperationException]::new('fixture unrelated failure')
+        }
+    } 'Non-file errors propagate'
+    Assert-True ($script:attempts -eq 1) 'Unrelated failures are never retried'
+
+    # Simulate cleanup denial on every platform; preserve the primary exception.
+    $lockedTemporary = Join-Path $temporary 'locked-staging'
+    New-Item -ItemType Directory -Path $lockedTemporary | Out-Null
+    function Remove-Item {
+        param($LiteralPath,[switch]$Recurse,[switch]$Force,$ErrorAction)
+        if ($LiteralPath -eq $lockedTemporary) { throw [UnauthorizedAccessException]::new('fixture cleanup denied') }
+        Microsoft.PowerShell.Management\Remove-Item @PSBoundParameters
+    }
+    $primary = $null
+    try {
+        try { throw [InvalidOperationException]::new('original extraction failure') }
+        finally { Remove-InstallerStaging $lockedTemporary -Attempts 1 -DelayMilliseconds 1 -WarningAction SilentlyContinue }
+    } catch { $primary = $_.Exception.Message }
+    Microsoft.PowerShell.Management\Remove-Item Function:Remove-Item
+    Assert-True ($primary -eq 'original extraction failure') 'Cleanup cannot mask the original failure'
+    Assert-True (Test-Path $lockedTemporary) 'Locked temporaries are left intact'
+    Remove-InstallerStaging $lockedTemporary
+    Assert-True (-not (Test-Path $lockedTemporary)) 'Cleanup can succeed once the lock clears'
+
     # Exercise the actual Expand-Archive and installation paths with a tiny fixture.
     $ffFixture = Join-Path $temporary 'ff-fixture/build/bin'
     New-Item -ItemType Directory -Path $ffFixture -Force | Out-Null
@@ -92,9 +136,15 @@ try {
     function Test-FFmpeg([string]$Bin) {
         return ($Bin -and (Test-Path (Join-Path $Bin 'ffmpeg.exe')) -and (Test-Path (Join-Path $Bin 'ffprobe.exe')))
     }
+    $canonical = Join-Path $root ('runtime/ffmpeg-' + $ffItem.version + '/bin')
+    New-Item -ItemType Directory -Path $canonical -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $canonical 'ffmpeg.exe'),'old incomplete installation')
     $bin = Install-FFmpeg $ffItem $root $cache -BundledOnly
+    Assert-True ($bin -ne $canonical) 'Fresh FFmpeg destination avoids the previous executable'
+    Assert-True (([IO.File]::ReadAllText((Join-Path $canonical 'ffmpeg.exe'))) -eq 'old incomplete installation') 'Old FFmpeg installation is never overwritten'
     Assert-True (Test-FFmpeg $bin) 'Both FFmpeg executables installed'
     Assert-True (Test-Path (Join-Path (Split-Path $bin -Parent) 'LICENSE')) 'FFmpeg license retained'
+    Assert-True ((Find-ManagedFFmpeg $ffItem $root) -eq $bin) 'Fresh installation is discovered on later launches'
     Assert-True ((Install-FFmpeg $ffItem $root $cache -BundledOnly) -eq $bin) 'FFmpeg installation is repeatable'
     Assert-True (@(Get-ChildItem $root -Directory -Filter 'unpack-*').Count -eq 0) 'Archive staging cleaned'
     Write-Host "PASS: $script:checks installer contract checks (native Windows installation tested separately)."

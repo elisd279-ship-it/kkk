@@ -14,7 +14,7 @@ try {
     . $installer
     $manifest = Read-DependencyManifest (Join-Path $source 'installer/dependencies.json')
     $python = Join-Path $root 'runtime/python/python.exe'
-    $bin = Join-Path $root ('runtime/ffmpeg-' + $manifest.ffmpeg.version + '/bin')
+    $bin = Find-ManagedFFmpeg $manifest.ffmpeg $root
     if (-not (Test-Python $python) -or -not (Test-FFmpeg $bin)) { throw 'Native readiness failed' }
     $env:PATH = $bin + [IO.Path]::PathSeparator + $previousPath
     Push-Location $source
@@ -43,6 +43,8 @@ try {
         } catch { Start-Sleep -Milliseconds 250 }
     }
     if (-not $ready) { throw 'Application HTTP readiness timed out' }
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $source 'tests/windows_lock_smoke.ps1') -Cache (Join-Path $root 'downloads')
+    if ($LASTEXITCODE -ne 0) { throw 'Native locking regressions failed' }
     Write-Host 'PASS: native Python install/signature, FFmpeg install/codecs, repeat installation, Windows PowerShell 5.1 contracts, application suite, shortcuts and installed application HTTP readiness.'
 } finally {
     if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }

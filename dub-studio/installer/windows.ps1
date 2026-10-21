@@ -9,6 +9,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $SourceRoot = Split-Path $PSScriptRoot -Parent
+$script:InstallerPhase = 'Preparar instalacion'
 
 function Read-DependencyManifest([string]$Path) {
     $manifest = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
@@ -75,19 +76,22 @@ function Test-Python([string]$Executable) {
 }
 
 function Test-FFmpeg([string]$Bin) {
+    $script:FFmpegDiagnostic = 'Ruta no disponible'
     if (-not $Bin) { return $false }
     foreach ($name in @('ffmpeg.exe','ffprobe.exe')) {
         $executable = Join-Path $Bin $name
-        if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) { return $false }
+        if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) { $script:FFmpegDiagnostic = 'No existe ' + $executable; return $false }
         try {
             $null = & $executable -version 2>$null
-            if ($LASTEXITCODE -ne 0) { return $false }
-        } catch { return $false }
+            if ($LASTEXITCODE -ne 0) { $script:FFmpegDiagnostic = '{0}: codigo {1}' -f $executable,$LASTEXITCODE; return $false }
+        } catch { $script:FFmpegDiagnostic = '{0}: {1}' -f $executable,$_.Exception.Message; return $false }
     }
     try {
         $encoders = (& (Join-Path $Bin 'ffmpeg.exe') -hide_banner -encoders 2>$null) -join "`n"
-        return ($LASTEXITCODE -eq 0 -and $encoders -match '\blibx264\b' -and $encoders -match '\baac\b')
-    } catch { return $false }
+        $ready = ($LASTEXITCODE -eq 0 -and $encoders -match '\blibx264\b' -and $encoders -match '\baac\b')
+        if (-not $ready) { $script:FFmpegDiagnostic = 'FFmpeg no ofrece los codificadores libx264 y aac' }
+        return $ready
+    } catch { $script:FFmpegDiagnostic = $_.Exception.Message; return $false }
 }
 
 function Find-Python([string]$ManagedPath) {
@@ -140,30 +144,101 @@ function Install-Python($Item, [string]$Root, [string]$Cache, [switch]$BundledOn
     return $executable
 }
 
+function Test-TransientFileError($Record) {
+    $exception = $Record.Exception
+    while ($exception) {
+        if ($exception -is [UnauthorizedAccessException]) { return $true }
+        if ($exception -is [IO.IOException] -and (($exception.HResult -band 65535) -in @(5,32,33))) { return $true }
+        if ($exception -is [ComponentModel.Win32Exception] -and $exception.NativeErrorCode -in @(5,32,33)) { return $true }
+        $exception = $exception.InnerException
+    }
+    return $false
+}
+
+function Invoke-FileOperation {
+    param([scriptblock]$Action, [string]$Description, [string]$Path,
+        [int]$Attempts=5, [int]$DelayMilliseconds=300)
+    for ($attempt=1; $attempt -le $Attempts; $attempt++) {
+        try { return (& $Action) } catch {
+            if (-not (Test-TransientFileError $_)) { throw }
+            if ($attempt -eq $Attempts) {
+                throw [IO.IOException]::new((
+                    '{0}: Windows mantiene bloqueada o deniega la ruta "{1}". {2}' -f $Description,$Path,$_.Exception.Message),$_.Exception)
+            }
+            Write-Host ("Windows mantiene un archivo ocupado; reintentando {0} ({1}/{2})..." -f $Description,$attempt,$Attempts)
+            Start-Sleep -Milliseconds ($DelayMilliseconds * $attempt)
+        }
+    }
+}
+
+function Remove-InstallerStaging {
+    [CmdletBinding()]
+    param([string]$Path, [int]$Attempts=3, [int]$DelayMilliseconds=300)
+    # Cleanup must never replace the original error or invalidate a successful install.
+    try {
+        if (-not (Test-Path -LiteralPath $Path)) { return }
+        Invoke-FileOperation -Description 'limpiar temporales' -Path $Path -Attempts $Attempts -DelayMilliseconds $DelayMilliseconds -Action {
+            Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+        }
+    } catch {
+        Write-Warning ('No se pudo limpiar el temporal "{0}". Se conserva para no interrumpir la instalacion. {1}' -f $Path,$_.Exception.Message)
+    }
+}
+
+function Find-ManagedFFmpeg($Item, [string]$Root) {
+    $runtime = Join-Path $Root 'runtime'
+    # Support existing installations, without changing files that another process may be using.
+    $canonical = Join-Path $runtime ('ffmpeg-' + $Item.version + '/bin')
+    if (Test-FFmpeg $canonical) { return $canonical }
+    if (Test-Path -LiteralPath $runtime) {
+        $pattern = '^ffmpeg-' + [Regex]::Escape($Item.version) + '-install-[a-f0-9]{32}$'
+        $directories = @(Get-ChildItem -LiteralPath $runtime -Directory | Where-Object { $_.Name -match $pattern } | Sort-Object Name)
+        foreach ($directory in $directories) {
+            $bin = Join-Path $directory.FullName 'bin'
+            if (Test-FFmpeg $bin) { return $bin }
+        }
+    }
+    return $null
+}
+
 function Install-FFmpeg($Item, [string]$Root, [string]$Cache, [switch]$BundledOnly) {
-    $destination = Join-Path $Root ('runtime\ffmpeg-' + $Item.version)
-    $bin = Join-Path $destination 'bin'
-    $existing = if ($BundledOnly) { if (Test-FFmpeg $bin) { $bin } } else { Find-FFmpeg $bin }
+    $script:InstallerPhase = 'Comprobar FFmpeg existente'
+    $existing = Find-ManagedFFmpeg $Item $Root
+    if (-not $existing -and -not $BundledOnly) { $existing = Find-FFmpeg $null }
     if ($existing) { Write-Host 'Compatible FFmpeg and ffprobe found.'; return $existing }
+    $script:InstallerPhase = 'Descargar FFmpeg'
     $download = Get-VerifiedDownload $Item $Cache
     $staging = Join-Path $Root ('unpack-' + [Guid]::NewGuid().ToString('N'))
+    # Use a fresh destination; never rename or overwrite a previous ffmpeg.exe.
+    $destination = Join-Path $Root ('runtime/ffmpeg-' + $Item.version + '-install-' + [Guid]::NewGuid().ToString('N'))
+    $bin = Join-Path $destination 'bin'
     try {
-        Expand-Archive -LiteralPath $download -DestinationPath $staging
+        $script:InstallerPhase = 'Extraer FFmpeg'
+        Invoke-FileOperation -Description 'extraer FFmpeg' -Path $staging -Action {
+            Expand-Archive -LiteralPath $download -DestinationPath $staging -Force
+        }
         $candidates = @(Get-ChildItem -LiteralPath $staging -Filter ffmpeg.exe -Recurse -File |
             Where-Object { Test-Path -LiteralPath (Join-Path $_.Directory.FullName 'ffprobe.exe') })
-        if ($candidates.Count -ne 1) { throw 'Unexpected FFmpeg archive layout.' }
+        if ($candidates.Count -ne 1) { throw ('Estructura inesperada del ZIP de FFmpeg en "{0}".' -f $staging) }
         $sourceBin = $candidates[0].Directory.FullName
-        if (-not (Test-FFmpeg $sourceBin)) { throw 'Downloaded FFmpeg cannot run on this Windows system.' }
-        New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
-        if (Test-Path -LiteralPath $destination) {
-            Move-Item -LiteralPath $destination -Destination ($destination + '-backup-' + [Guid]::NewGuid().ToString('N'))
+        $script:InstallerPhase = 'Comprobar FFmpeg extraido'
+        $ready = $false
+        for ($attempt=1; $attempt -le 4; $attempt++) {
+            if (Test-FFmpeg $sourceBin) { $ready=$true; break }
+            if ($attempt -lt 4) { Start-Sleep -Milliseconds (300 * $attempt) }
         }
+        if (-not $ready) { throw ('Windows no permite ejecutar FFmpeg o faltan codificadores en "{0}". Detalle: {1}' -f $sourceBin,$script:FFmpegDiagnostic) }
+        New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
+        $script:InstallerPhase = 'Guardar FFmpeg'
+        $sourceDirectory = Split-Path $sourceBin -Parent
+        # Atomic rename in the same volume, with bounded retries for transient file locks.
         # Retain licenses and build notices alongside the binaries.
-        Move-Item -LiteralPath (Split-Path $sourceBin -Parent) -Destination $destination
-    } finally {
-        if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
-    }
-    if (-not (Test-FFmpeg $bin)) { throw 'FFmpeg readiness check failed.' }
+        Invoke-FileOperation -Description 'guardar FFmpeg' -Path $destination -Action {
+            [IO.Directory]::Move($sourceDirectory,$destination)
+        }
+    } finally { Remove-InstallerStaging $staging }
+    $script:InstallerPhase = 'Comprobar FFmpeg instalado'
+    if (-not (Test-FFmpeg $bin)) { throw ('No se puede ejecutar FFmpeg instalado en "{0}". Detalle: {1}' -f $bin,$script:FFmpegDiagnostic) }
     return $bin
 }
 
@@ -189,7 +264,7 @@ function Install-Application([string]$Source, [string]$Root) {
             throw
         }
     } finally {
-        if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+        Remove-InstallerStaging $staging
     }
     return $destination
 }
@@ -236,8 +311,10 @@ function Invoke-Installer {
     try {
         $manifest = Read-DependencyManifest (Join-Path $PSScriptRoot 'dependencies.json')
         $cache = Join-Path $InstallRoot 'downloads'
+        $script:InstallerPhase = 'Instalar Python'
         $python = Install-Python $manifest.python $InstallRoot $cache -BundledOnly:$BundledOnly
         $ffmpeg = Install-FFmpeg $manifest.ffmpeg $InstallRoot $cache -BundledOnly:$BundledOnly
+        $script:InstallerPhase = 'Instalar aplicacion'
         $application = Install-Application $SourceRoot $InstallRoot
         if (-not $NoShortcuts) {
             try { New-AppShortcuts $application } catch { Write-Warning 'Could not create shortcuts. You can still use Iniciar.bat.' }
@@ -247,6 +324,7 @@ function Invoke-Installer {
         Write-Host "Application: $application"
         Write-Host 'Projects remain in your user profile: .dubstudio'
     } finally { if ($lock) { $lock.Dispose() } }
+    $script:InstallerPhase = 'Iniciar DUB Studio'
     if ($Launch) { Start-Studio $python $ffmpeg $application }
 }
 
@@ -262,7 +340,12 @@ if ($MyInvocation.InvocationName -ne '.') {
     } catch {
         Write-Host ''
         Write-Host ('ERROR: ' + $_.Exception.Message) -ForegroundColor Red
-        Write-Host 'Check your connection and available disk space, then run Instalar.bat again.'
+        Write-Host ('Fase: ' + $script:InstallerPhase)
+        Write-Host ('Detalle: ' + $_.Exception.ToString())
+        Write-Host ('Ubicacion: ' + $_.InvocationInfo.PositionMessage)
+        Write-Host 'Cierra otras ventanas de DUB Studio y vuelve a ejecutar Instalar.bat.'
+        Write-Host 'Si el error persiste, comparte las ultimas lineas del registro para identificar el bloqueo.'
+        Write-Host ('Registro: ' + (Join-Path $InstallRoot 'install.log'))
         exit 1
     } finally { if ($transcript) { Stop-Transcript | Out-Null } }
 }

@@ -137,3 +137,16 @@ como instalador normal; usa `Instalar.bat`.
 Para mantener las versiones fijadas, contrasta las nuevas descargas con las publicaciones
 del proveedor (Python: bundle `.sigstore` del mismo archivo; FFmpeg: `.zip.sha256`), actualiza
 el manifiesto y ejecuta las pruebas. No sustituyas el hash esperado para eludir un fallo.
+
+### Si Windows deniega el acceso a ffmpeg.exe
+
+El instalador reintenta operaciones cuando hay bloqueos transitorios de archivos.
+Si una instalación anterior de FFmpeg está ocupada o incompleta, instala una copia
+verificada en otra carpeta del mismo usuario, sin sobrescribir el ejecutable anterior.
+Un fallo al limpiar temporales queda como aviso y no oculta el resultado de instalación.
+Los temporales bloqueados pueden quedar en `%LOCALAPPDATA%\DUBStudio\unpack-*`.
+
+Cierra otras ventanas de DUB Studio y ejecuta el `Instalar.bat` de la versión actualizada.
+Si persiste, abre `%LOCALAPPDATA%\DUBStudio\install.log` y comparte sus últimas líneas:
+incluyen la fase, ruta y excepción originales para distinguir un bloqueo transitorio
+de una restricción permanente. El instalador respeta las restricciones de Windows.
