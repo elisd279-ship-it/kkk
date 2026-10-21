@@ -194,8 +194,20 @@ function Find-ManagedFFmpeg($Item, [string]$Root) {
         $pattern = '^ffmpeg-' + [Regex]::Escape($Item.version) + '-install-[a-f0-9]{32}$'
         $directories = @(Get-ChildItem -LiteralPath $runtime -Directory | Where-Object { $_.Name -match $pattern } | Sort-Object Name)
         foreach ($directory in $directories) {
+            # Earlier installers stored bin directly; preserve those valid installations.
             $bin = Join-Path $directory.FullName 'bin'
             if (Test-FFmpeg $bin) { return $bin }
+            $marker = Join-Path $directory.FullName 'ready.json'
+            if (Test-Path -LiteralPath $marker -PathType Leaf) {
+                try {
+                    if ((Get-Item -LiteralPath $marker).Length -gt 8192) { continue }
+                    $ready = Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json
+                    if ($ready.version -ne $Item.version -or $ready.sha256 -ne $Item.sha256 -or
+                        $ready.relativeBin -notmatch '^(?!\.{1,2}/)[A-Za-z0-9._-]+/bin$') { continue }
+                    $bin = Join-Path $directory.FullName $ready.relativeBin
+                    if (Test-FFmpeg $bin) { return $bin }
+                } catch { continue }
+            }
         }
     }
     return $null
@@ -208,38 +220,40 @@ function Install-FFmpeg($Item, [string]$Root, [string]$Cache, [switch]$BundledOn
     if ($existing) { Write-Host 'Compatible FFmpeg and ffprobe found.'; return $existing }
     $script:InstallerPhase = 'Descargar FFmpeg'
     $download = Get-VerifiedDownload $Item $Cache
-    $staging = Join-Path $Root ('unpack-' + [Guid]::NewGuid().ToString('N'))
-    # Use a fresh destination; never rename or overwrite a previous ffmpeg.exe.
+    # Extract into a fresh FINAL location. Never move or delete an executable after
+    # testing it: Windows or a scanner may still have its image open at that point.
     $destination = Join-Path $Root ('runtime/ffmpeg-' + $Item.version + '-install-' + [Guid]::NewGuid().ToString('N'))
-    $bin = Join-Path $destination 'bin'
+    $executionStarted = $false
     try {
         $script:InstallerPhase = 'Extraer FFmpeg'
-        Invoke-FileOperation -Description 'extraer FFmpeg' -Path $staging -Action {
-            Expand-Archive -LiteralPath $download -DestinationPath $staging -Force
+        Invoke-FileOperation -Description 'extraer FFmpeg' -Path $destination -Action {
+            Expand-Archive -LiteralPath $download -DestinationPath $destination -Force
         }
-        $candidates = @(Get-ChildItem -LiteralPath $staging -Filter ffmpeg.exe -Recurse -File |
+        $candidates = @(Get-ChildItem -LiteralPath $destination -Filter ffmpeg.exe -Recurse -File |
             Where-Object { Test-Path -LiteralPath (Join-Path $_.Directory.FullName 'ffprobe.exe') })
-        if ($candidates.Count -ne 1) { throw ('Estructura inesperada del ZIP de FFmpeg en "{0}".' -f $staging) }
-        $sourceBin = $candidates[0].Directory.FullName
-        $script:InstallerPhase = 'Comprobar FFmpeg extraido'
+        if ($candidates.Count -ne 1) { throw ('Estructura inesperada del ZIP de FFmpeg en "{0}".' -f $destination) }
+        $bin = $candidates[0].Directory.FullName
+        $script:InstallerPhase = 'Comprobar FFmpeg en su ubicacion definitiva'
+        $executionStarted = $true
         $ready = $false
         for ($attempt=1; $attempt -le 4; $attempt++) {
-            if (Test-FFmpeg $sourceBin) { $ready=$true; break }
+            if (Test-FFmpeg $bin) { $ready=$true; break }
             if ($attempt -lt 4) { Start-Sleep -Milliseconds (300 * $attempt) }
         }
-        if (-not $ready) { throw ('Windows no permite ejecutar FFmpeg o faltan codificadores en "{0}". Detalle: {1}' -f $sourceBin,$script:FFmpegDiagnostic) }
-        New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
-        $script:InstallerPhase = 'Guardar FFmpeg'
-        $sourceDirectory = Split-Path $sourceBin -Parent
-        # Atomic rename in the same volume, with bounded retries for transient file locks.
-        # Retain licenses and build notices alongside the binaries.
-        Invoke-FileOperation -Description 'guardar FFmpeg' -Path $destination -Action {
-            [IO.Directory]::Move($sourceDirectory,$destination)
-        }
-    } finally { Remove-InstallerStaging $staging }
-    $script:InstallerPhase = 'Comprobar FFmpeg instalado'
-    if (-not (Test-FFmpeg $bin)) { throw ('No se puede ejecutar FFmpeg instalado en "{0}". Detalle: {1}' -f $bin,$script:FFmpegDiagnostic) }
-    return $bin
+        if (-not $ready) { throw ('Windows no permite ejecutar FFmpeg o faltan codificadores en "{0}". Detalle: {1}' -f $bin,$script:FFmpegDiagnostic) }
+        # A marker is written only after the complete extraction and native checks.
+        # Unfinished directories will not be reused on the next attempt.
+        $script:InstallerPhase = 'Registrar FFmpeg comprobado'
+        $relativeBin = $bin.Substring($destination.Length).TrimStart('\','/').Replace('\','/')
+        if ($relativeBin -notmatch '^(?!\.{1,2}/)[A-Za-z0-9._-]+/bin$') { throw 'Unexpected FFmpeg bin layout.' }
+        $marker = @{version=$Item.version;sha256=$Item.sha256;relativeBin=$relativeBin} | ConvertTo-Json
+        $marker | Set-Content -LiteralPath (Join-Path $destination 'ready.json') -Encoding UTF8
+        # Keep licenses and notices in their original archive layout. No rename here.
+        return $bin
+    } catch {
+        if (-not $executionStarted) { Remove-InstallerStaging $destination }
+        throw
+    }
 }
 
 function Install-Application([string]$Source, [string]$Root) {

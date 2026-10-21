@@ -140,11 +140,14 @@ el manifiesto y ejecuta las pruebas. No sustituyas el hash esperado para eludir 
 
 ### Si Windows deniega el acceso a ffmpeg.exe
 
-El instalador reintenta operaciones cuando hay bloqueos transitorios de archivos.
-Si una instalación anterior de FFmpeg está ocupada o incompleta, instala una copia
-verificada en otra carpeta del mismo usuario, sin sobrescribir el ejecutable anterior.
+El instalador extrae FFmpeg directamente en su ubicación definitiva y lo comprueba allí:
+no mueve ni elimina el ejecutable después de probarlo. Reintenta operaciones cuando hay
+bloqueos transitorios de archivos. Si una instalación anterior está ocupada o incompleta,
+instala una copia verificada en otra carpeta del mismo usuario, sin sobrescribirla.
+Solo reutiliza las nuevas carpetas después de completar su extracción y comprobaciones.
 Un fallo al limpiar temporales queda como aviso y no oculta el resultado de instalación.
-Los temporales bloqueados pueden quedar en `%LOCALAPPDATA%\DUBStudio\unpack-*`.
+Los temporales bloqueados o las instalaciones incompletas pueden conservarse en
+`%LOCALAPPDATA%\DUBStudio`; no afectan a los proyectos.
 
 Cierra otras ventanas de DUB Studio y ejecuta el `Instalar.bat` de la versión actualizada.
 Si persiste, abre `%LOCALAPPDATA%\DUBStudio\install.log` y comparte sus últimas líneas:

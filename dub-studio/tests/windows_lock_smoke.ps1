@@ -55,12 +55,29 @@ public static class DubLockRelease {
     $oldFile = Join-Path $oldBin 'ffmpeg.exe'
     [IO.File]::WriteAllText($oldFile,'incomplete old runtime - keep intact')
     $held = [IO.File]::Open($oldFile,'Open','ReadWrite','None')
-    $newBin = Install-FFmpeg $manifest.ffmpeg $root $Cache -BundledOnly
+    # Pin the newly checked executable too, reproducing the user's post-validation
+    # directory-move denial. Installation must succeed without moving that image.
+    $realTestFFmpeg = ${function:Test-FFmpeg}
+    $script:pinnedImage = $null
+    function Test-FFmpeg([string]$Bin) {
+        $valid = & $realTestFFmpeg $Bin
+        if ($valid -and -not $script:pinnedImage -and $Bin.StartsWith($root)) {
+            $script:pinnedImage = [IO.File]::Open((Join-Path $Bin 'ffmpeg.exe'),'Open','Read','Read')
+        }
+        return $valid
+    }
+    try {
+        $newBin = Install-FFmpeg $manifest.ffmpeg $root $Cache -BundledOnly
+        if (-not $script:pinnedImage) { throw 'The new executable was not pinned after validation.' }
+    } finally {
+        if ($script:pinnedImage) { $script:pinnedImage.Dispose() }
+        Set-Item Function:Test-FFmpeg $realTestFFmpeg
+    }
     if ($newBin -eq $oldBin -or -not (Test-FFmpeg $newBin)) { throw 'A locked old runtime prevented fresh FFmpeg installation.' }
     if ((Find-ManagedFFmpeg $manifest.ffmpeg $root) -ne $newBin) { throw 'Fresh FFmpeg cannot be reused.' }
     $held.Dispose(); $held=$null
     if ([IO.File]::ReadAllText($oldFile) -ne 'incomplete old runtime - keep intact') { throw 'Old executable was modified.' }
-    Write-Host 'PASS: native file lock recovery, cleanup preserves primary errors, and FFmpeg installs beside a locked old executable.'
+    Write-Host 'PASS: native file lock recovery, cleanup preserves primary errors, and FFmpeg installs without moving its locked image after validation.'
 } finally {
     if ($held) { $held.Dispose() }
     if (Test-Path $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force }

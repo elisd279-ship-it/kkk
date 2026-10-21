@@ -145,6 +145,23 @@ try {
     Assert-True (Test-FFmpeg $bin) 'Both FFmpeg executables installed'
     Assert-True (Test-Path (Join-Path (Split-Path $bin -Parent) 'LICENSE')) 'FFmpeg license retained'
     Assert-True ((Find-ManagedFFmpeg $ffItem $root) -eq $bin) 'Fresh installation is discovered on later launches'
+    $readyMarker = Join-Path (Split-Path (Split-Path $bin -Parent) -Parent) 'ready.json'
+    $readyContent = Get-Content -LiteralPath $readyMarker -Raw
+    Remove-Item -LiteralPath $readyMarker
+    Assert-True (-not (Find-ManagedFFmpeg $ffItem $root)) 'Unfinished nested installation is never reused'
+    $badMarker = $readyContent | ConvertFrom-Json
+    $badMarker.sha256 = 'mismatched release'
+    $badMarker | ConvertTo-Json | Set-Content -LiteralPath $readyMarker
+    Assert-True (-not (Find-ManagedFFmpeg $ffItem $root)) 'Marker must match the verified release'
+    $badMarker.sha256 = $ffItem.sha256
+    $unrelated = Join-Path $root 'runtime/bin'
+    New-Item -ItemType Directory -Path $unrelated -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $unrelated 'ffmpeg.exe'),'unrelated executable')
+    [IO.File]::WriteAllText((Join-Path $unrelated 'ffprobe.exe'),'unrelated executable')
+    $badMarker.relativeBin = '../bin'
+    $badMarker | ConvertTo-Json | Set-Content -LiteralPath $readyMarker
+    Assert-True (-not (Find-ManagedFFmpeg $ffItem $root)) 'Marker cannot escape the runtime directory'
+    [IO.File]::WriteAllText($readyMarker,$readyContent)
     Assert-True ((Install-FFmpeg $ffItem $root $cache -BundledOnly) -eq $bin) 'FFmpeg installation is repeatable'
     Assert-True (@(Get-ChildItem $root -Directory -Filter 'unpack-*').Count -eq 0) 'Archive staging cleaned'
     Write-Host "PASS: $script:checks installer contract checks (native Windows installation tested separately)."
