@@ -68,8 +68,9 @@ function Assert-PythonSignature([string]$Path) {
 function Test-Python([string]$Executable) {
     if (-not $Executable -or -not (Test-Path -LiteralPath $Executable -PathType Leaf)) { return $false }
     try {
-        $result = & $Executable -I -c 'import sys,sqlite3,ssl,http.server; print("DUB_OK" if sys.version_info >= (3,10) else "DUB_OLD")' 2>$null
-        return ($LASTEXITCODE -eq 0 -and $result -eq 'DUB_OK')
+        # Avoid embedded quotes: Windows PowerShell 5.1 uses legacy native argument passing.
+        & $Executable -I -c 'import sys,sqlite3,ssl,http.server; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>$null | Out-Null
+        return ($LASTEXITCODE -eq 0)
     } catch { return $false }
 }
 
