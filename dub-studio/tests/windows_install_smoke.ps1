@@ -59,7 +59,9 @@ Start-Studio $Python $FFmpeg $Application -DataRoot $DataRoot -PreferredPort 187
     $starterArgs = @('-NoProfile','-ExecutionPolicy','Bypass','-File',('"{0}"' -f $starter),
         '-Installer',('"{0}"' -f $installer),'-Python',('"{0}"' -f $python),'-FFmpeg',('"{0}"' -f $bin),
         '-Application',('"{0}"' -f $application),'-DataRoot',('"{0}"' -f $launchData),'-Result',('"{0}"' -f $started))
-    $parent = Start-Process powershell.exe -ArgumentList $starterArgs -Wait -PassThru
+    $parent = Start-Process powershell.exe -ArgumentList $starterArgs -PassThru
+    # Start-Process -Wait on Windows waits for descendants too; only wait for the launcher itself.
+    if (-not $parent.WaitForExit(45000)) { throw 'Detached launcher did not return' }
     if ($parent.ExitCode -ne 0) { throw 'Detached launcher failed' }
     $running = Get-Content -LiteralPath $started -Raw | ConvertFrom-Json
     $health = Get-StudioHealth $running.port

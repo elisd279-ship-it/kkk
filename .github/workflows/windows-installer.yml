@@ -9,6 +9,9 @@ on:
       - 'dub-studio/**'
       - '.github/workflows/windows-installer.yml'
   workflow_dispatch:
+concurrency:
+  group: windows-installer-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
