@@ -1,4 +1,5 @@
 import copy
+import sqlite3
 import json
 import tempfile
 import threading
@@ -29,6 +30,18 @@ class StudioTest(unittest.TestCase):
         self.store=Store(Path(self.tmp.name)/'data'); self.cid=self.store.chapter('Episode 4',SRT)
     def identity(self): self.store.identity(self.cid,'Ana','Green shirt','Low voice','Human-confirmed fixture')
     def line(self): return self.store.state(self.cid)['lines'][0]
+    def test_database_context_closes_and_preserves_transaction_semantics(self):
+        with self.store.connect() as db:
+            db.execute('INSERT INTO chapters(name) VALUES(?)',('Committed',))
+        with self.assertRaises(sqlite3.ProgrammingError): db.execute('SELECT 1')
+        with self.assertRaisesRegex(RuntimeError,'rollback fixture'):
+            with self.store.connect() as failed:
+                failed.execute('INSERT INTO chapters(name) VALUES(?)',('Rolled back',))
+                raise RuntimeError('rollback fixture')
+        with self.assertRaises(sqlite3.ProgrammingError): failed.execute('SELECT 1')
+        names=[x['name'] for x in self.store.state()['chapters']]
+        self.assertIn('Committed',names)
+        self.assertNotIn('Rolled back',names)
     def test_persistence_and_exact_original_export(self):
         self.identity(); line=self.line()
         self.store.review(line['id'],'Ana','Part 2 00:00:01 — observed lips','Hola / ¡buenas!\nOtra vez.')

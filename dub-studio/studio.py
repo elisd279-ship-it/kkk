@@ -1,5 +1,6 @@
 """Persistent application layer; original CLI stays independent."""
 import base64
+from contextlib import contextmanager
 import json
 import math
 import os
@@ -56,10 +57,16 @@ class Store:
             CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY, line INTEGER NOT NULL,
                 action TEXT NOT NULL, payload TEXT NOT NULL, created TEXT DEFAULT CURRENT_TIMESTAMP);
             ''')
+    @contextmanager
     def connect(self):
         db = sqlite3.connect(self.root / 'studio.sqlite3')
         db.row_factory = sqlite3.Row
-        return db
+        try:
+            with db:
+                yield db
+        finally:
+            # SQLite's transaction context does not close the connection itself.
+            db.close()
     def chapter(self, name, srt):
         if not name.strip(): raise ValueError('Indica el nombre del capítulo')
         blocks = parse_srt(srt)
