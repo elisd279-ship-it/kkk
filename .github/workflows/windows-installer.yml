@@ -1,0 +1,22 @@
+name: Windows installer
+on:
+  push:
+    paths:
+      - 'dub-studio/**'
+      - '.github/workflows/windows-installer.yml'
+  pull_request:
+    paths:
+      - 'dub-studio/**'
+      - '.github/workflows/windows-installer.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install private dependencies and verify on Windows PowerShell 5.1
+        shell: powershell
+        run: .\dub-studio\tests\windows_install_smoke.ps1

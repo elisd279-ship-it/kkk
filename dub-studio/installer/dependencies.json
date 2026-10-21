@@ -1,0 +1,14 @@
+{
+  "python": {
+    "version": "3.14.8",
+    "filename": "python-3.14.8-amd64.exe",
+    "url": "https://www.python.org/ftp/python/3.14.8/python-3.14.8-amd64.exe",
+    "sha256": "759be887b96e736a3ca886daf8d575f18fcae1a09efab6902f42d59e8999f8ef"
+  },
+  "ffmpeg": {
+    "version": "8.1.2",
+    "filename": "ffmpeg-8.1.2-essentials_build.zip",
+    "url": "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.1.2-essentials_build.zip",
+    "sha256": "db580001caa24ac104c8cb856cd113a87b0a443f7bdf47d8c12b1d740584a2ec"
+  }
+}

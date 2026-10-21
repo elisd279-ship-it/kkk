@@ -1,9 +1,12 @@
 @echo off
+setlocal
 cd /d "%~dp0"
-where py >nul 2>nul
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0installer\windows.ps1" -Launch
 if errorlevel 1 (
-  python app.py --open-browser
-) else (
-  py -3 app.py --open-browser
+  echo.
+  echo No se pudo iniciar DUB Studio. Ejecuta Instalar.bat para reintentar.
+  echo Registro: %%LOCALAPPDATA%%\DUBStudio\install.log
+  pause
+  exit /b 1
 )
-pause
+endlocal

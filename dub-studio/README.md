@@ -22,11 +22,31 @@ El núcleo de consola no realiza reconocimiento audiovisual ni traducción IA. `
 El núcleo y sus comandos anteriores siguen disponibles, sin cambios. La nueva interfaz
 usa únicamente la biblioteca estándar de Python; no requiere paquetes de aplicación.
 
-1. Instala **Python 3.10 o posterior** y **FFmpeg** (incluido `ffprobe`) en tu ordenador.
-   Comprueba `python --version`, `ffmpeg -version` y `ffprobe -version`.
-2. En la carpeta `dub-studio`, ejecuta `python app.py --open-browser`, o usa `Iniciar.bat` en Windows / `./iniciar.sh` en macOS o Linux.
-3. Abre en tu navegador la dirección que muestra la consola. Detén la aplicación con Ctrl+C.
-   Solo escucha en la interfaz local; no es un servicio público.
+**Windows 10/11 de 64 bits:** descomprime el ZIP y haz doble clic en **`Instalar.bat`**.
+No necesitas `winget`, preparar Python o FFmpeg, editar el PATH ni ejecutar como administrador.
+El instalador comprueba si ya tienes versiones compatibles y descarga las que falten.
+Después crea accesos directos en el escritorio y el menú Inicio y abre la aplicación.
+Las siguientes veces usa el acceso directo **DUB Studio** o `Iniciar.bat`.
+
+La primera instalación requiere conexión a Internet y aproximadamente 1 GB libre para
+las descargas, la instalación y los archivos temporales. Los vídeos requieren espacio adicional.
+La aplicación y sus dependencias se guardan en `%LOCALAPPDATA%\DUBStudio`, sin modificar
+el PATH permanente. Las actualizaciones conservan la aplicación anterior en una carpeta
+`app-backup-*` y mantienen los proyectos en su ubicación original. Si falla, vuelve a
+abrir `Instalar.bat`: reutiliza las descargas válidas y muestra el motivo del fallo. El registro
+se encuentra en `%LOCALAPPDATA%\DUBStudio\install.log`.
+
+Se utilizan **Python 3.14.8** de python.org y **FFmpeg 8.1.2 Essentials** de Gyan cuando
+faltan dependencias. Las descargas se comprueban contra hashes SHA256 fijados en
+`installer/dependencies.json`; el instalador de Python también necesita una firma válida
+de Python Software Foundation. Nunca se ejecuta un archivo cuya verificación falle.
+La licencia y los avisos de FFmpeg se conservan junto a sus binarios. La IA sigue siendo
+opcional y necesita tu propia clave de Gemini; el instalador no la solicita ni la almacena.
+
+**macOS / Linux, o ejecución manual:** instala Python 3.10+ y FFmpeg/ffprobe y ejecuta
+`python3 app.py --open-browser` desde `dub-studio` (o `./iniciar.sh`). En macOS con Homebrew:
+`brew install python ffmpeg`. En Ubuntu/Debian: `sudo apt install python3 ffmpeg`.
+La automatización de instalación de esta versión es para Windows x64.
 
 Los datos se guardan en `~/.dubstudio` (SQLite y copias de vídeos). Puedes elegir otra
 ubicación con `python app.py --data RUTA --port 8765`. Para trasladar el trabajo a otro
@@ -100,3 +120,20 @@ fiable de desfases, muestreo adaptativo/cambios de plano, firmas de voz e identi
 referencias audiovisuales confirmadas, evaluación de sincronía labial y ajuste de traducción
 a duración. La precisión audiovisual no se ha certificado. El registro actual guarda
 las descripciones y evidencias textuales confirmadas, sin embeddings biométricos.
+
+### Comprobación del instalador
+
+`tests/installer_contract.ps1` comprueba caché, rechazo de descargas corruptas y firmas
+inválidas, protección de datos y reinstalación con rutas que contienen espacios. Se puede
+ejecutar con Windows PowerShell 5.1 o PowerShell 7, sin instalar Pester.
+
+El workflow `.github/workflows/windows-installer.yml` usa una máquina Windows desechable
+y ejecuta `tests/windows_install_smoke.ps1`: descarga e instala realmente las dependencias,
+verifica las firmas, prueba la reinstalación sin descargas, ejecuta la suite de la aplicación
+y comprueba los accesos directos y el arranque HTTP de la copia instalada. El parámetro
+`-BundledOnly` fuerza dependencias privadas para esa prueba. No uses esta prueba de integración
+como instalador normal; usa `Instalar.bat`.
+
+Para mantener las versiones fijadas, contrasta las nuevas descargas con las publicaciones
+del proveedor (Python: bundle `.sigstore` del mismo archivo; FFmpeg: `.zip.sha256`), actualiza
+el manifiesto y ejecuta las pruebas. No sustituyas el hash esperado para eludir un fallo.
